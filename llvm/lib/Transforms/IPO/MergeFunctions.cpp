@@ -94,7 +94,6 @@
 #include "llvm/ADT/Statistic.h"
 #include "llvm/IR/Argument.h"
 #include "llvm/IR/BasicBlock.h"
-#include "llvm/IR/Constant.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/DebugLoc.h"
@@ -172,14 +171,14 @@ namespace {
 
 class FunctionNode {
   mutable AssertingVH<Function> F;
-  IRHash Hash;
+  stable_hash Hash;
 
 public:
   // Note the hash is recalculated potentially multiple times, but it is cheap.
   FunctionNode(Function *F) : F(F), Hash(StructuralHash(*F)) {}
 
   Function *getFunc() const { return F; }
-  IRHash getHash() const { return Hash; }
+  stable_hash getHash() const { return Hash; }
 
   /// Replace the reference to the function F by the function G, assuming their
   /// implementations are equal.
@@ -256,20 +255,22 @@ private:
 
   /// Fill PDIUnrelatedWL with instructions from the entry block that are
   /// unrelated to parameter related debug info.
-  /// \param PDPVUnrelatedWL The equivalent non-intrinsic debug records.
-  void filterInstsUnrelatedToPDI(BasicBlock *GEntryBlock,
-                                 std::vector<Instruction *> &PDIUnrelatedWL,
-                                 std::vector<DPValue *> &PDPVUnrelatedWL);
+  /// \param PDVRUnrelatedWL The equivalent non-intrinsic debug records.
+  void
+  filterInstsUnrelatedToPDI(BasicBlock *GEntryBlock,
+                            std::vector<Instruction *> &PDIUnrelatedWL,
+                            std::vector<DbgVariableRecord *> &PDVRUnrelatedWL);
 
   /// Erase the rest of the CFG (i.e. barring the entry block).
   void eraseTail(Function *G);
 
   /// Erase the instructions in PDIUnrelatedWL as they are unrelated to the
   /// parameter debug info, from the entry block.
-  /// \param PDPVUnrelatedWL contains the equivalent set of non-instruction
+  /// \param PDVRUnrelatedWL contains the equivalent set of non-instruction
   /// debug-info records.
-  void eraseInstsUnrelatedToPDI(std::vector<Instruction *> &PDIUnrelatedWL,
-                                std::vector<DPValue *> &PDPVUnrelatedWL);
+  void
+  eraseInstsUnrelatedToPDI(std::vector<Instruction *> &PDIUnrelatedWL,
+                           std::vector<DbgVariableRecord *> &PDVRUnrelatedWL);
 
   /// Replace G with a simple tail call to bitcast(F). Also (unless
   /// MergeFunctionsPDI holds) replace direct uses of G with bitcast(F),
@@ -418,7 +419,7 @@ bool MergeFunctions::runOnModule(Module &M) {
 
   // All functions in the module, ordered by hash. Functions with a unique
   // hash value are easily eliminated.
-  std::vector<std::pair<IRHash, Function *>> HashedFuncs;
+  std::vector<std::pair<stable_hash, Function *>> HashedFuncs;
   for (Function &Func : M) {
     if (isEligibleForMerging(Func)) {
       HashedFuncs.push_back({StructuralHash(Func), &Func});
@@ -512,7 +513,7 @@ static Value *createCast(IRBuilder<> &Builder, Value *V, Type *DestTy) {
 // parameter debug info, from the entry block.
 void MergeFunctions::eraseInstsUnrelatedToPDI(
     std::vector<Instruction *> &PDIUnrelatedWL,
-    std::vector<DPValue *> &PDPVUnrelatedWL) {
+    std::vector<DbgVariableRecord *> &PDVRUnrelatedWL) {
   LLVM_DEBUG(
       dbgs() << " Erasing instructions (in reverse order of appearance in "
                 "entry block) unrelated to parameter debug info from entry "
@@ -526,13 +527,13 @@ void MergeFunctions::eraseInstsUnrelatedToPDI(
     PDIUnrelatedWL.pop_back();
   }
 
-  while (!PDPVUnrelatedWL.empty()) {
-    DPValue *DPV = PDPVUnrelatedWL.back();
-    LLVM_DEBUG(dbgs() << "  Deleting DPValue ");
-    LLVM_DEBUG(DPV->print(dbgs()));
+  while (!PDVRUnrelatedWL.empty()) {
+    DbgVariableRecord *DVR = PDVRUnrelatedWL.back();
+    LLVM_DEBUG(dbgs() << "  Deleting DbgVariableRecord ");
+    LLVM_DEBUG(DVR->print(dbgs()));
     LLVM_DEBUG(dbgs() << "\n");
-    DPV->eraseFromParent();
-    PDPVUnrelatedWL.pop_back();
+    DVR->eraseFromParent();
+    PDVRUnrelatedWL.pop_back();
   }
 
   LLVM_DEBUG(dbgs() << " } // Done erasing instructions unrelated to parameter "
@@ -564,12 +565,12 @@ void MergeFunctions::eraseTail(Function *G) {
 // PDIUnrelatedWL with such instructions.
 void MergeFunctions::filterInstsUnrelatedToPDI(
     BasicBlock *GEntryBlock, std::vector<Instruction *> &PDIUnrelatedWL,
-    std::vector<DPValue *> &PDPVUnrelatedWL) {
+    std::vector<DbgVariableRecord *> &PDVRUnrelatedWL) {
   std::set<Instruction *> PDIRelated;
-  std::set<DPValue *> PDPVRelated;
+  std::set<DbgVariableRecord *> PDVRRelated;
 
-  // Work out whether a dbg.value intrinsic or an equivalent DPValue is a
-  // parameter to be preserved.
+  // Work out whether a dbg.value intrinsic or an equivalent DbgVariableRecord
+  // is a parameter to be preserved.
   auto ExamineDbgValue = [](auto *DbgVal, auto &Container) {
     LLVM_DEBUG(dbgs() << " Deciding: ");
     LLVM_DEBUG(DbgVal->print(dbgs()));
@@ -641,14 +642,14 @@ void MergeFunctions::filterInstsUnrelatedToPDI(
 
   for (BasicBlock::iterator BI = GEntryBlock->begin(), BIE = GEntryBlock->end();
        BI != BIE; ++BI) {
-    // Examine DPValues as they happen "before" the instruction. Are they
-    // connected to parameters?
-    for (DPValue &DPV : DPValue::filter(BI->getDbgValueRange())) {
-      if (DPV.isDbgValue() || DPV.isDbgAssign()) {
-        ExamineDbgValue(&DPV, PDPVRelated);
+    // Examine DbgVariableRecords as they happen "before" the instruction. Are
+    // they connected to parameters?
+    for (DbgVariableRecord &DVR : filterDbgVars(BI->getDbgRecordRange())) {
+      if (DVR.isDbgValue() || DVR.isDbgAssign()) {
+        ExamineDbgValue(&DVR, PDVRRelated);
       } else {
-        assert(DPV.isDbgDeclare());
-        ExamineDbgDeclare(&DPV, PDPVRelated);
+        assert(DVR.isDbgDeclare());
+        ExamineDbgDeclare(&DVR, PDVRRelated);
       }
     }
 
@@ -686,8 +687,8 @@ void MergeFunctions::filterInstsUnrelatedToPDI(
 
   // Collect the set of unrelated instructions and debug records.
   for (Instruction &I : *GEntryBlock) {
-    for (DPValue &DPV : DPValue::filter(I.getDbgValueRange()))
-      IsPDIRelated(&DPV, PDPVRelated, PDPVUnrelatedWL);
+    for (DbgVariableRecord &DVR : filterDbgVars(I.getDbgRecordRange()))
+      IsPDIRelated(&DVR, PDVRRelated, PDVRUnrelatedWL);
     IsPDIRelated(&I, PDIRelated, PDIUnrelatedWL);
   }
   LLVM_DEBUG(dbgs() << " }\n");
@@ -710,11 +711,13 @@ static bool canCreateThunkFor(Function *F) {
   return true;
 }
 
-/// Copy metadata from one function to another.
-static void copyMetadataIfPresent(Function *From, Function *To, StringRef Key) {
-  if (MDNode *MD = From->getMetadata(Key)) {
-    To->setMetadata(Key, MD);
-  }
+/// Copy all metadata of a specific kind from one function to another.
+static void copyMetadataIfPresent(Function *From, Function *To,
+                                  StringRef Kind) {
+  SmallVector<MDNode *, 4> MDs;
+  From->getMetadata(Kind, MDs);
+  for (MDNode *MD : MDs)
+    To->addMetadata(Kind, *MD);
 }
 
 // Replace G with a simple tail call to bitcast(F). Also (unless
@@ -728,7 +731,7 @@ static void copyMetadataIfPresent(Function *From, Function *To, StringRef Key) {
 void MergeFunctions::writeThunk(Function *F, Function *G) {
   BasicBlock *GEntryBlock = nullptr;
   std::vector<Instruction *> PDIUnrelatedWL;
-  std::vector<DPValue *> PDPVUnrelatedWL;
+  std::vector<DbgVariableRecord *> PDVRUnrelatedWL;
   BasicBlock *BB = nullptr;
   Function *NewG = nullptr;
   if (MergeFunctionsPDI) {
@@ -740,7 +743,7 @@ void MergeFunctions::writeThunk(Function *F, Function *G) {
         dbgs() << "writeThunk: (MergeFunctionsPDI) filter parameter related "
                   "debug info for "
                << G->getName() << "() {\n");
-    filterInstsUnrelatedToPDI(GEntryBlock, PDIUnrelatedWL, PDPVUnrelatedWL);
+    filterInstsUnrelatedToPDI(GEntryBlock, PDIUnrelatedWL, PDVRUnrelatedWL);
     GEntryBlock->getTerminator()->eraseFromParent();
     BB = GEntryBlock;
   } else {
@@ -790,7 +793,7 @@ void MergeFunctions::writeThunk(Function *F, Function *G) {
                  << G->getName() << "()\n");
     }
     eraseTail(G);
-    eraseInstsUnrelatedToPDI(PDIUnrelatedWL, PDPVUnrelatedWL);
+    eraseInstsUnrelatedToPDI(PDIUnrelatedWL, PDVRUnrelatedWL);
     LLVM_DEBUG(
         dbgs() << "} // End of parameter related debug info filtering for: "
                << G->getName() << "()\n");

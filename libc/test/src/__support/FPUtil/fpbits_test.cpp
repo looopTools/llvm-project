@@ -1,4 +1,4 @@
-//===-- Unittests for the DyadicFloat class -------------------------------===//
+//===-- Unittests for the FPBits class ------------------------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -9,11 +9,13 @@
 #include "src/__support/FPUtil/FPBits.h"
 #include "src/__support/FPUtil/fpbits_str.h"
 #include "src/__support/integer_literals.h"
+#include "src/__support/macros/properties/types.h"
+#include "src/__support/sign.h" // Sign
 #include "test/UnitTest/Test.h"
 
+using LIBC_NAMESPACE::Sign;
 using LIBC_NAMESPACE::fputil::FPBits;
 using LIBC_NAMESPACE::fputil::FPType;
-using LIBC_NAMESPACE::fputil::Sign;
 using LIBC_NAMESPACE::fputil::internal::FPRep;
 
 using LIBC_NAMESPACE::operator""_u16;
@@ -238,6 +240,7 @@ template <typename T> constexpr auto make(Sign sign, FP fp) {
   case FP::QUIET_NAN:
     return T::quiet_nan(sign);
   }
+  __builtin_unreachable();
 }
 
 // Tests all properties for all types of float.
@@ -424,12 +427,9 @@ TEST(LlvmLibcFPBitsTest, DoubleType) {
   EXPECT_EQ(quiet_nan.is_quiet_nan(), true);
 }
 
-#ifdef LIBC_TARGET_ARCH_IS_X86
+#ifdef LIBC_TYPES_LONG_DOUBLE_IS_X86_FLOAT80
 TEST(LlvmLibcFPBitsTest, X86LongDoubleType) {
   using LongDoubleBits = FPBits<long double>;
-
-  if constexpr (sizeof(long double) == sizeof(double))
-    return; // The tests for the "double" type cover for this case.
 
   EXPECT_STREQ(LIBC_NAMESPACE::str(LongDoubleBits::inf(Sign::POS)).c_str(),
                "(+Infinity)");
@@ -503,7 +503,7 @@ TEST(LlvmLibcFPBitsTest, X86LongDoubleType) {
 }
 #else
 TEST(LlvmLibcFPBitsTest, LongDoubleType) {
-#if defined(LIBC_LONG_DOUBLE_IS_FLOAT64)
+#if defined(LIBC_TYPES_LONG_DOUBLE_IS_FLOAT64)
   return; // The tests for the "double" type cover for this case.
 #else
   using LongDoubleBits = FPBits<long double>;
@@ -575,7 +575,7 @@ TEST(LlvmLibcFPBitsTest, LongDoubleType) {
 }
 #endif
 
-#if defined(LIBC_COMPILER_HAS_FLOAT128)
+#if defined(LIBC_TYPES_HAS_FLOAT128)
 TEST(LlvmLibcFPBitsTest, Float128Type) {
   using Float128Bits = FPBits<float128>;
 
@@ -643,4 +643,4 @@ TEST(LlvmLibcFPBitsTest, Float128Type) {
   Float128Bits quiet_nan = Float128Bits::quiet_nan();
   EXPECT_EQ(quiet_nan.is_quiet_nan(), true);
 }
-#endif // LIBC_COMPILER_HAS_FLOAT128
+#endif // LIBC_TYPES_HAS_FLOAT128

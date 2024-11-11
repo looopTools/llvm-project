@@ -26,6 +26,7 @@ using namespace acc;
 #include "mlir/Dialect/OpenACC/OpenACCOpsEnums.cpp.inc"
 #include "mlir/Dialect/OpenACC/OpenACCOpsInterfaces.cpp.inc"
 #include "mlir/Dialect/OpenACC/OpenACCTypeInterfaces.cpp.inc"
+#include "mlir/Dialect/OpenACCMPCommon/Interfaces/OpenACCMPOpsInterfaces.cpp.inc"
 
 namespace {
 struct MemRefPointerLikeModel
@@ -457,7 +458,7 @@ static ParseResult parseRegions(OpAsmParser &parser, OperationState &state,
 }
 
 static bool isComputeOperation(Operation *op) {
-  return isa<acc::ParallelOp>(op) || isa<acc::LoopOp>(op);
+  return isa<acc::ParallelOp, acc::LoopOp>(op);
 }
 
 namespace {
@@ -729,8 +730,8 @@ checkSymOperandList(Operation *op, std::optional<mlir::ArrayAttr> attributes,
 }
 
 unsigned ParallelOp::getNumDataOperands() {
-  return getReductionOperands().size() + getGangPrivateOperands().size() +
-         getGangFirstPrivateOperands().size() + getDataClauseOperands().size();
+  return getReductionOperands().size() + getPrivateOperands().size() +
+         getFirstprivateOperands().size() + getDataClauseOperands().size();
 }
 
 Value ParallelOp::getDataOperand(unsigned i) {
@@ -758,20 +759,23 @@ static LogicalResult verifyDeviceTypeAndSegmentCountMatch(
     Op op, OperandRange operands, DenseI32ArrayAttr segments,
     ArrayAttr deviceTypes, llvm::StringRef keyword, int32_t maxInSegment = 0) {
   std::size_t numOperandsInSegments = 0;
+  std::size_t nbOfSegments = 0;
 
-  if (!segments)
-    return success();
-
-  for (auto segCount : segments.asArrayRef()) {
-    if (maxInSegment != 0 && segCount > maxInSegment)
-      return op.emitOpError() << keyword << " expects a maximum of "
-                              << maxInSegment << " values per segment";
-    numOperandsInSegments += segCount;
+  if (segments) {
+    for (auto segCount : segments.asArrayRef()) {
+      if (maxInSegment != 0 && segCount > maxInSegment)
+        return op.emitOpError() << keyword << " expects a maximum of "
+                                << maxInSegment << " values per segment";
+      numOperandsInSegments += segCount;
+      ++nbOfSegments;
+    }
   }
-  if (numOperandsInSegments != operands.size())
+
+  if ((numOperandsInSegments != operands.size()) ||
+      (!deviceTypes && !operands.empty()))
     return op.emitOpError()
            << keyword << " operand count does not match count in segments";
-  if (deviceTypes.getValue().size() != (size_t)segments.size())
+  if (deviceTypes && deviceTypes.getValue().size() != nbOfSegments)
     return op.emitOpError()
            << keyword << " segment count does not match device_type count";
   return success();
@@ -779,8 +783,12 @@ static LogicalResult verifyDeviceTypeAndSegmentCountMatch(
 
 LogicalResult acc::ParallelOp::verify() {
   if (failed(checkSymOperandList<mlir::acc::PrivateRecipeOp>(
-          *this, getPrivatizations(), getGangPrivateOperands(), "private",
+          *this, getPrivatizations(), getPrivateOperands(), "private",
           "privatizations", /*checkOperandType=*/false)))
+    return failure();
+  if (failed(checkSymOperandList<mlir::acc::FirstprivateRecipeOp>(
+          *this, getFirstprivatizations(), getFirstprivateOperands(),
+          "firstprivate", "firstprivatizations", /*checkOperandType=*/false)))
     return failure();
   if (failed(checkSymOperandList<mlir::acc::ReductionRecipeOp>(
           *this, getReductionRecipes(), getReductionOperands(), "reduction",
@@ -903,6 +911,31 @@ mlir::Value ParallelOp::getWaitDevnum(mlir::acc::DeviceType deviceType) {
   return getWaitDevnumValue(getWaitOperandsDeviceType(), getWaitOperands(),
                             getWaitOperandsSegments(), getHasWaitDevnum(),
                             deviceType);
+}
+
+void ParallelOp::build(mlir::OpBuilder &odsBuilder,
+                       mlir::OperationState &odsState,
+                       mlir::ValueRange numGangs, mlir::ValueRange numWorkers,
+                       mlir::ValueRange vectorLength,
+                       mlir::ValueRange asyncOperands,
+                       mlir::ValueRange waitOperands, mlir::Value ifCond,
+                       mlir::Value selfCond, mlir::ValueRange reductionOperands,
+                       mlir::ValueRange gangPrivateOperands,
+                       mlir::ValueRange gangFirstPrivateOperands,
+                       mlir::ValueRange dataClauseOperands) {
+
+  ParallelOp::build(
+      odsBuilder, odsState, asyncOperands, /*asyncOperandsDeviceType=*/nullptr,
+      /*asyncOnly=*/nullptr, waitOperands, /*waitOperandsSegments=*/nullptr,
+      /*waitOperandsDeviceType=*/nullptr, /*hasWaitDevnum=*/nullptr,
+      /*waitOnly=*/nullptr, numGangs, /*numGangsSegments=*/nullptr,
+      /*numGangsDeviceType=*/nullptr, numWorkers,
+      /*numWorkersDeviceType=*/nullptr, vectorLength,
+      /*vectorLengthDeviceType=*/nullptr, ifCond, selfCond,
+      /*selfAttr=*/nullptr, reductionOperands, /*reductionRecipes=*/nullptr,
+      gangPrivateOperands, /*privatizations=*/nullptr, gangFirstPrivateOperands,
+      /*firstprivatizations=*/nullptr, dataClauseOperands,
+      /*defaultAttr=*/nullptr, /*combined=*/nullptr);
 }
 
 static ParseResult parseNumGangs(
@@ -1283,13 +1316,57 @@ static void printDeviceTypeOperandsWithKeywordOnly(
   p << ")";
 }
 
+static ParseResult
+parseCombinedConstructsLoop(mlir::OpAsmParser &parser,
+                            mlir::acc::CombinedConstructsTypeAttr &attr) {
+  if (succeeded(parser.parseOptionalKeyword("combined"))) {
+    if (parser.parseLParen())
+      return failure();
+    if (succeeded(parser.parseOptionalKeyword("kernels"))) {
+      attr = mlir::acc::CombinedConstructsTypeAttr::get(
+          parser.getContext(), mlir::acc::CombinedConstructsType::KernelsLoop);
+    } else if (succeeded(parser.parseOptionalKeyword("parallel"))) {
+      attr = mlir::acc::CombinedConstructsTypeAttr::get(
+          parser.getContext(), mlir::acc::CombinedConstructsType::ParallelLoop);
+    } else if (succeeded(parser.parseOptionalKeyword("serial"))) {
+      attr = mlir::acc::CombinedConstructsTypeAttr::get(
+          parser.getContext(), mlir::acc::CombinedConstructsType::SerialLoop);
+    } else {
+      parser.emitError(parser.getCurrentLocation(),
+                       "expected compute construct name");
+      return failure();
+    }
+    if (parser.parseRParen())
+      return failure();
+  }
+  return success();
+}
+
+static void
+printCombinedConstructsLoop(mlir::OpAsmPrinter &p, mlir::Operation *op,
+                            mlir::acc::CombinedConstructsTypeAttr attr) {
+  if (attr) {
+    switch (attr.getValue()) {
+    case mlir::acc::CombinedConstructsType::KernelsLoop:
+      p << "combined(kernels)";
+      break;
+    case mlir::acc::CombinedConstructsType::ParallelLoop:
+      p << "combined(parallel)";
+      break;
+    case mlir::acc::CombinedConstructsType::SerialLoop:
+      p << "combined(serial)";
+      break;
+    };
+  }
+}
+
 //===----------------------------------------------------------------------===//
 // SerialOp
 //===----------------------------------------------------------------------===//
 
 unsigned SerialOp::getNumDataOperands() {
-  return getReductionOperands().size() + getGangPrivateOperands().size() +
-         getGangFirstPrivateOperands().size() + getDataClauseOperands().size();
+  return getReductionOperands().size() + getPrivateOperands().size() +
+         getFirstprivateOperands().size() + getDataClauseOperands().size();
 }
 
 Value SerialOp::getDataOperand(unsigned i) {
@@ -1347,8 +1424,12 @@ mlir::Value SerialOp::getWaitDevnum(mlir::acc::DeviceType deviceType) {
 
 LogicalResult acc::SerialOp::verify() {
   if (failed(checkSymOperandList<mlir::acc::PrivateRecipeOp>(
-          *this, getPrivatizations(), getGangPrivateOperands(), "private",
+          *this, getPrivatizations(), getPrivateOperands(), "private",
           "privatizations", /*checkOperandType=*/false)))
+    return failure();
+  if (failed(checkSymOperandList<mlir::acc::FirstprivateRecipeOp>(
+          *this, getFirstprivatizations(), getFirstprivateOperands(),
+          "firstprivate", "firstprivatizations", /*checkOperandType=*/false)))
     return failure();
   if (failed(checkSymOperandList<mlir::acc::ReductionRecipeOp>(
           *this, getReductionRecipes(), getReductionOperands(), "reduction",
@@ -1720,9 +1801,8 @@ bool hasDuplicateDeviceTypes(
     return false;
   for (auto attr : *segments) {
     auto deviceTypeAttr = mlir::dyn_cast<mlir::acc::DeviceTypeAttr>(attr);
-    if (deviceTypes.contains(deviceTypeAttr.getValue()))
+    if (!deviceTypes.insert(deviceTypeAttr.getValue()).second)
       return true;
-    deviceTypes.insert(deviceTypeAttr.getValue());
   }
   return false;
 }
@@ -1737,9 +1817,8 @@ LogicalResult checkDeviceTypes(mlir::ArrayAttr deviceTypes) {
         mlir::dyn_cast_or_null<mlir::acc::DeviceTypeAttr>(attr);
     if (!deviceTypeAttr)
       return failure();
-    if (crtDeviceTypes.contains(deviceTypeAttr.getValue()))
+    if (!crtDeviceTypes.insert(deviceTypeAttr.getValue()).second)
       return failure();
-    crtDeviceTypes.insert(deviceTypeAttr.getValue());
   }
   return success();
 }
@@ -1850,6 +1929,13 @@ LogicalResult acc::LoopOp::verify() {
           *this, getReductionRecipes(), getReductionOperands(), "reduction",
           "reductions", false)))
     return failure();
+
+  if (getCombined().has_value() &&
+      (getCombined().value() != acc::CombinedConstructsType::ParallelLoop &&
+       getCombined().value() != acc::CombinedConstructsType::KernelsLoop &&
+       getCombined().value() != acc::CombinedConstructsType::SerialLoop)) {
+    return emitError("unexpected combined constructs attribute");
+  }
 
   // Check non-empty body().
   if (getRegion().empty())
@@ -2034,8 +2120,8 @@ void printLoopControl(OpAsmPrinter &p, Operation *op, Region &region,
     llvm::interleaveComma(regionArgs, p,
                           [&p](Value v) { p << v << " : " << v.getType(); });
     p << ") = (" << lowerbound << " : " << lowerboundType << ") to ("
-      << upperbound << " : " << upperboundType << ") "
-      << " step (" << steps << " : " << stepType << ") ";
+      << upperbound << " : " << upperboundType << ") " << " step (" << steps
+      << " : " << stepType << ") ";
   }
   p.printRegion(region, /*printEntryBlockArgs=*/false);
 }
@@ -2827,6 +2913,36 @@ mlir::acc::getBounds(mlir::Operation *accDataClauseOp) {
             return mlir::SmallVector<mlir::Value, 0>();
           })};
   return bounds;
+}
+
+mlir::SmallVector<mlir::Value>
+mlir::acc::getAsyncOperands(mlir::Operation *accDataClauseOp) {
+  return llvm::TypeSwitch<mlir::Operation *, mlir::SmallVector<mlir::Value>>(
+             accDataClauseOp)
+      .Case<ACC_DATA_ENTRY_OPS, ACC_DATA_EXIT_OPS>([&](auto dataClause) {
+        return mlir::SmallVector<mlir::Value>(
+            dataClause.getAsyncOperands().begin(),
+            dataClause.getAsyncOperands().end());
+      })
+      .Default([&](mlir::Operation *) {
+        return mlir::SmallVector<mlir::Value, 0>();
+      });
+}
+
+mlir::ArrayAttr
+mlir::acc::getAsyncOperandsDeviceType(mlir::Operation *accDataClauseOp) {
+  return llvm::TypeSwitch<mlir::Operation *, mlir::ArrayAttr>(accDataClauseOp)
+      .Case<ACC_DATA_ENTRY_OPS, ACC_DATA_EXIT_OPS>([&](auto dataClause) {
+        return dataClause.getAsyncOperandsDeviceTypeAttr();
+      })
+      .Default([&](mlir::Operation *) { return mlir::ArrayAttr{}; });
+}
+
+mlir::ArrayAttr mlir::acc::getAsyncOnly(mlir::Operation *accDataClauseOp) {
+  return llvm::TypeSwitch<mlir::Operation *, mlir::ArrayAttr>(accDataClauseOp)
+      .Case<ACC_DATA_ENTRY_OPS, ACC_DATA_EXIT_OPS>(
+          [&](auto dataClause) { return dataClause.getAsyncOnlyAttr(); })
+      .Default([&](mlir::Operation *) { return mlir::ArrayAttr{}; });
 }
 
 std::optional<llvm::StringRef> mlir::acc::getVarName(mlir::Operation *accOp) {

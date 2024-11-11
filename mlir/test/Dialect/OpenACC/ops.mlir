@@ -1703,8 +1703,8 @@ acc.set default_async(%i32Value : i32)
 // CHECK-LABEL: func.func @acc_atomic_read
 // CHECK-SAME: (%[[v:.*]]: memref<i32>, %[[x:.*]]: memref<i32>)
 func.func @acc_atomic_read(%v: memref<i32>, %x: memref<i32>) {
-  // CHECK: acc.atomic.read %[[v]] = %[[x]] : memref<i32>, i32
-  acc.atomic.read %v = %x : memref<i32>, i32
+  // CHECK: acc.atomic.read %[[v]] = %[[x]] : memref<i32>, memref<i32>, i32
+  acc.atomic.read %v = %x : memref<i32>, memref<i32>, i32
   return
 }
 
@@ -1806,7 +1806,7 @@ func.func @acc_atomic_capture(%v: memref<i32>, %x: memref<i32>, %expr: i32) {
   // CHECK-NEXT:   %[[newval:.*]] = llvm.add %[[xval]], %[[expr]] : i32
   // CHECK-NEXT:   acc.yield %[[newval]] : i32
   // CHECK-NEXT: }
-  // CHECK-NEXT: acc.atomic.read %[[v]] = %[[x]] : memref<i32>, i32
+  // CHECK-NEXT: acc.atomic.read %[[v]] = %[[x]] : memref<i32>, memref<i32>, i32
   // CHECK-NEXT: }
   acc.atomic.capture {
     acc.atomic.update %x : memref<i32> {
@@ -1814,10 +1814,10 @@ func.func @acc_atomic_capture(%v: memref<i32>, %x: memref<i32>, %expr: i32) {
       %newval = llvm.add %xval, %expr : i32
       acc.yield %newval : i32
     }
-    acc.atomic.read %v = %x : memref<i32>, i32
+    acc.atomic.read %v = %x : memref<i32>, memref<i32>, i32
   }
   // CHECK: acc.atomic.capture {
-  // CHECK-NEXT: acc.atomic.read %[[v]] = %[[x]] : memref<i32>, i32
+  // CHECK-NEXT: acc.atomic.read %[[v]] = %[[x]] : memref<i32>, memref<i32>, i32
   // CHECK-NEXT: acc.atomic.update %[[x]] : memref<i32>
   // CHECK-NEXT: (%[[xval:.*]]: i32):
   // CHECK-NEXT:   %[[newval:.*]] = llvm.add %[[xval]], %[[expr]] : i32
@@ -1825,7 +1825,7 @@ func.func @acc_atomic_capture(%v: memref<i32>, %x: memref<i32>, %expr: i32) {
   // CHECK-NEXT: }
   // CHECK-NEXT: }
   acc.atomic.capture {
-    acc.atomic.read %v = %x : memref<i32>, i32
+    acc.atomic.read %v = %x : memref<i32>, memref<i32>, i32
     acc.atomic.update %x : memref<i32> {
     ^bb0(%xval: i32):
       %newval = llvm.add %xval, %expr : i32
@@ -1833,11 +1833,11 @@ func.func @acc_atomic_capture(%v: memref<i32>, %x: memref<i32>, %expr: i32) {
     }
   }
   // CHECK: acc.atomic.capture {
-  // CHECK-NEXT: acc.atomic.read %[[v]] = %[[x]] : memref<i32>, i32
+  // CHECK-NEXT: acc.atomic.read %[[v]] = %[[x]] : memref<i32>, memref<i32>, i32
   // CHECK-NEXT: acc.atomic.write %[[x]] = %[[expr]] : memref<i32>, i32
   // CHECK-NEXT: }
   acc.atomic.capture {
-    acc.atomic.read %v = %x : memref<i32>, i32
+    acc.atomic.read %v = %x : memref<i32>, memref<i32>, i32
     acc.atomic.write %x = %expr : memref<i32>, i32
   }
 
@@ -1846,9 +1846,49 @@ func.func @acc_atomic_capture(%v: memref<i32>, %x: memref<i32>, %expr: i32) {
 
 // -----
 
-%c2 = arith.constant 2 : i32
-%c1 = arith.constant 1 : i32
-acc.parallel num_gangs({%c2 : i32} [#acc.device_type<default>], {%c1 : i32, %c1 : i32, %c1 : i32} [#acc.device_type<nvidia>]) {
+// CHECK-LABEL: func.func @acc_num_gangs
+func.func @acc_num_gangs() {
+  %c2 = arith.constant 2 : i32
+  %c1 = arith.constant 1 : i32
+  acc.parallel num_gangs({%c2 : i32} [#acc.device_type<default>], {%c1 : i32, %c1 : i32, %c1 : i32} [#acc.device_type<nvidia>]) {
+  }
+
+  return
 }
 
 // CHECK: acc.parallel num_gangs({%c2{{.*}} : i32} [#acc.device_type<default>], {%c1{{.*}} : i32, %c1{{.*}} : i32, %c1{{.*}} : i32} [#acc.device_type<nvidia>])
+
+// -----
+
+// CHECK-LABEL: func.func @acc_combined
+func.func @acc_combined() {
+  acc.parallel combined(loop) {
+    acc.loop combined(parallel) {
+      acc.yield
+    }
+    acc.terminator
+  }
+
+  acc.kernels combined(loop) {
+    acc.loop combined(kernels) {
+      acc.yield
+    }
+    acc.terminator
+  }
+
+  acc.serial combined(loop) {
+    acc.loop combined(serial) {
+      acc.yield
+    }
+    acc.terminator
+  }
+
+  return
+}
+
+// CHECK: acc.parallel combined(loop)
+// CHECK: acc.loop combined(parallel)
+// CHECK: acc.kernels combined(loop)
+// CHECK: acc.loop combined(kernels)
+// CHECK: acc.serial combined(loop)
+// CHECK: acc.loop combined(serial)

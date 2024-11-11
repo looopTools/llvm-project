@@ -242,6 +242,10 @@ class TargetRegisterClass;
       VEXTRACT_SEXT_ELT,
       VEXTRACT_ZEXT_ELT,
 
+      // Double select nodes for machines without conditional-move.
+      DOUBLE_SELECT_I,
+      DOUBLE_SELECT_I64,
+
       // Load/Store Left/Right nodes.
       LWL = ISD::FIRST_TARGET_MEMORY_OPCODE,
       LWR,
@@ -360,6 +364,8 @@ class TargetRegisterClass;
     getExceptionSelectorRegister(const Constant *PersonalityFn) const override {
       return ABI.IsN64() ? Mips::A1_64 : Mips::A1;
     }
+
+    bool softPromoteHalfType() const override { return true; }
 
     bool isJumpTableRelative() const override {
       return getTargetMachine().isPositionIndependent();
@@ -546,6 +552,7 @@ class TargetRegisterClass;
                         bool HasExtractInsert) const;
     SDValue lowerFABS64(SDValue Op, SelectionDAG &DAG,
                         bool HasExtractInsert) const;
+    SDValue lowerFCANONICALIZE(SDValue Op, SelectionDAG &DAG) const;
     SDValue lowerFRAMEADDR(SDValue Op, SelectionDAG &DAG) const;
     SDValue lowerRETURNADDR(SDValue Op, SelectionDAG &DAG) const;
     SDValue lowerEH_RETURN(SDValue Op, SelectionDAG &DAG) const;

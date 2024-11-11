@@ -132,7 +132,7 @@ let Definition = "debugger" in {
     Global,
     DefaultStringValue<"${ansi.normal}">,
     Desc<"When displaying the line marker in a color-enabled terminal, use the ANSI terminal code specified in this format immediately after the line to be marked.">;
-  def TerminalWidth: Property<"term-width", "SInt64">,
+  def TerminalWidth: Property<"term-width", "UInt64">,
     Global,
     DefaultUnsignedValue<80>,
     Desc<"The maximum number of columns to use for displaying text.">;
@@ -225,4 +225,8 @@ let Definition = "debugger" in {
     DefaultEnumValue<"eDWIMPrintVerbosityNone">,
     EnumValues<"OptionEnumValues(g_dwim_print_verbosities)">,
     Desc<"The verbosity level used by dwim-print.">;
+  def ShowInlineDiagnostics: Property<"show-inline-diagnostics", "Boolean">,
+    Global,
+    DefaultFalse,
+    Desc<"Controls whether diagnostics can refer directly to the command input, drawing arrows to it. If false, diagnostics will echo the input.">;
 }

@@ -54,13 +54,14 @@ to format C/C++/Java/JavaScript/JSON/Objective-C/Protobuf/C# code.
                                        Objective-C: .m .mm
                                        Proto: .proto .protodevel
                                        TableGen: .td
-                                       TextProto: .textpb .pb.txt .textproto .asciipb
+                                       TextProto: .txtpb .textpb .pb.txt .textproto .asciipb
                                        Verilog: .sv .svh .v .vh
     --cursor=<uint>                - The position of the cursor when invoking
                                      clang-format from an editor integration
     --dry-run                      - If set, do not actually make the formatting changes
     --dump-config                  - Dump configuration options to stdout and exit.
                                      Can be used with -style option.
+    --fail-on-incomplete-format    - If set, fail with exit code 1 on incomplete format.
     --fallback-style=<string>      - The name of the predefined style used as a
                                      fallback in case clang-format is invoked with
                                      -style=file, but can not find the .clang-format
@@ -362,8 +363,3 @@ those as well).
 
 These commands use the file paths shown in the diff output
 so they will only work from the root of the repository.
-
-Current State of Clang Format for LLVM
-======================================
-
-The following table :doc:`ClangFormattedStatus` shows the current status of clang-formatting for the entire LLVM source tree.

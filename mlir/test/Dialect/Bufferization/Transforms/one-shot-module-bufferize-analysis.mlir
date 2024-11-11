@@ -1,9 +1,14 @@
 // RUN: mlir-opt %s -one-shot-bufferize="bufferize-function-boundaries test-analysis-only" -split-input-file | FileCheck %s
 
 // Run fuzzer with different seeds.
-// RUN: mlir-opt %s -one-shot-bufferize="bufferize-function-boundaries test-analysis-only analysis-fuzzer-seed=23" -split-input-file -o /dev/null
-// RUN: mlir-opt %s -one-shot-bufferize="bufferize-function-boundaries test-analysis-only analysis-fuzzer-seed=59" -split-input-file -o /dev/null
-// RUN: mlir-opt %s -one-shot-bufferize="bufferize-function-boundaries test-analysis-only analysis-fuzzer-seed=91" -split-input-file -o /dev/null
+// RUN: mlir-opt %s -one-shot-bufferize="bufferize-function-boundaries test-analysis-only analysis-heuristic=fuzzer analysis-fuzzer-seed=23" -split-input-file -o /dev/null
+// RUN: mlir-opt %s -one-shot-bufferize="bufferize-function-boundaries test-analysis-only analysis-heuristic=fuzzer analysis-fuzzer-seed=59" -split-input-file -o /dev/null
+// RUN: mlir-opt %s -one-shot-bufferize="bufferize-function-boundaries test-analysis-only analysis-heuristic=fuzzer analysis-fuzzer-seed=91" -split-input-file -o /dev/null
+
+// Try different heuristics. Not checking the result, just make sure that we do
+// not crash.
+// RUN: mlir-opt %s -one-shot-bufferize="bufferize-function-boundaries test-analysis-only analysis-heuristic=bottom-up-from-terminators" -split-input-file -o /dev/null
+// RUN: mlir-opt %s -one-shot-bufferize="bufferize-function-boundaries test-analysis-only analysis-heuristic=top-down" -split-input-file -o /dev/null
 
 // TODO: Extract op-specific test cases and move them to their respective
 // dialects.
@@ -1342,4 +1347,16 @@ func.func @private_func_aliasing(%t: tensor<?xf32>) -> f32 {
   %0, %1 = func.call @ext_func(%t) : (tensor<?xf32>) -> (tensor<5xf32>, tensor<6xf32>)
   %2 = tensor.extract %1[%c0] : tensor<6xf32>
   return %2 : f32
+}
+
+// -----
+
+// CHECK-LABEL: func @recursive_function
+func.func @recursive_function(%a: tensor<?xf32>, %b: tensor<?xf32>) -> (tensor<?xf32>, tensor<?xf32>) {
+  // The analysis does not support recursive function calls and is conservative
+  // around them.
+  // CHECK: call @recursive_function
+  // CHECK-SAME: {__inplace_operands_attr__ = ["false", "false"]}
+  %0:2 = call @recursive_function(%a, %b) : (tensor<?xf32>, tensor<?xf32>) -> (tensor<?xf32>, tensor<?xf32>)
+  return %0#0, %0#1 : tensor<?xf32>, tensor<?xf32>
 }
